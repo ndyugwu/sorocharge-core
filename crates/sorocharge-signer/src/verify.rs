@@ -316,9 +316,11 @@ pub fn verify_entry(
 ///
 /// # Errors
 ///
-/// Returns [`SorochargeError::InvalidSignature`] if the total valid
-/// signature weight is below the threshold, or if any individual signature
-/// verification fails.
+/// Returns [`SorochargeError::InvalidSignature`] if the summed weight of
+/// delegates whose signatures verify is below `threshold`. An individual
+/// signature that fails to verify, or a signer absent from
+/// `signers_with_weights`, is not itself an error — it simply contributes no
+/// weight, so the entry fails only if the remaining weight falls short.
 ///
 /// Returns [`SorochargeError::ExpiredEntry`] or
 /// [`SorochargeError::ExpirationExceedsAllowance`] for an entry that has
@@ -444,8 +446,8 @@ mod tests {
         valid_until_ledger: u32,
     }
 
-    fn load() -> Fixture {
-        let fixture = load_signed_fixture("legacy_transfer_signed");
+    fn load(name: &str) -> Fixture {
+        let fixture = load_signed_fixture(name);
         let xdr_entry = SorobanAuthorizationEntry::from_xdr_base64(
             &fixture.signed_entry_xdr_base64,
             Limits::none(),
@@ -467,7 +469,7 @@ mod tests {
 
     #[test]
     fn accepts_a_valid_entry_signed_by_the_reference_sdk() {
-        let f = load();
+        let f = load("legacy_transfer_signed");
         let result = verify_entry(
             &f.signed,
             &f.expected,
@@ -477,9 +479,83 @@ mod tests {
         assert_eq!(result, Ok(()));
     }
 
+    /// The same acceptance proof for CAP-71 V2 credentials: `verify_entry`
+    /// claims to verify `sorobanCredentialsAddressV2` entries, and this
+    /// fixture is signed by the pinned `@stellar/stellar-sdk`'s own
+    /// `authorizeEntry`, not by this library — so it cannot pass merely by
+    /// agreeing with our own producer.
+    #[test]
+    fn accepts_an_address_v2_entry_signed_by_the_reference_sdk() {
+        let f = load("address_v2_transfer_signed");
+        assert!(matches!(
+            f.signed.as_xdr().credentials,
+            SorobanCredentials::AddressV2(_)
+        ));
+        let result = verify_entry(
+            &f.signed,
+            &f.expected,
+            f.valid_until_ledger - 1,
+            &f.network_passphrase,
+        );
+        assert_eq!(result, Ok(()));
+    }
+
+    /// The Delegated counterpart to `accepts_a_valid_entry_signed_by_the_reference_sdk`:
+    /// `delegated_transfer_signed.json` carries a genuine signature on *both*
+    /// delegate nodes, produced by the pinned SDK's `authorizeEntry` with
+    /// `forAddress` targeting each node in turn. This exercises the most
+    /// structurally complex credential kind against real reference output,
+    /// not just an entry this library signed for itself.
+    #[test]
+    fn accepts_a_delegated_entry_signed_by_the_reference_sdk() {
+        let fixture = load_signed_fixture("delegated_transfer_signed");
+        let xdr_entry = SorobanAuthorizationEntry::from_xdr_base64(
+            &fixture.signed_entry_xdr_base64,
+            Limits::none(),
+        )
+        .expect("fixture XDR should decode");
+
+        let SorobanCredentials::AddressWithDelegates(credentials) = &xdr_entry.credentials else {
+            panic!("delegated fixture should carry AddressWithDelegates credentials");
+        };
+        assert_eq!(
+            credentials.delegates.len(),
+            2,
+            "fixture should carry exactly the two delegate signers it was generated with"
+        );
+
+        let payload = signing_payload(
+            &xdr_entry.credentials,
+            &xdr_entry.root_invocation,
+            &fixture.network_passphrase,
+        )
+        .expect("fixture payload should reconstruct");
+        for delegate in credentials.delegates.iter() {
+            assert!(
+                is_valid_ed25519_signature(&delegate.address, &payload, &delegate.signature),
+                "every delegate node in this fixture should carry a genuine reference-SDK signature"
+            );
+        }
+
+        let expected = ChargeParams {
+            asset_contract: fixture.asset_contract.parse().unwrap(),
+            amount: fixture.amount.parse().unwrap(),
+            payer: fixture.payer.parse().unwrap(),
+            recipient: fixture.recipient.parse().unwrap(),
+            valid_until_ledger: fixture.valid_until_ledger,
+        };
+        let result = verify_entry(
+            &SignedEntry(xdr_entry),
+            &expected,
+            fixture.valid_until_ledger - 1,
+            &fixture.network_passphrase,
+        );
+        assert_eq!(result, Ok(()));
+    }
+
     #[test]
     fn rejects_an_expired_entry() {
-        let f = load();
+        let f = load("legacy_transfer_signed");
         let result = verify_entry(
             &f.signed,
             &f.expected,
@@ -497,7 +573,7 @@ mod tests {
 
     #[test]
     fn rejects_an_entry_valid_longer_than_the_caller_allows() {
-        let f = load();
+        let f = load("legacy_transfer_signed");
         let mut expected = f.expected;
         expected.valid_until_ledger = f.valid_until_ledger - 1;
         let result = verify_entry(
@@ -517,7 +593,7 @@ mod tests {
 
     #[test]
     fn rejects_wrong_asset_contract() {
-        let f = load();
+        let f = load("legacy_transfer_signed");
         let mut expected = f.expected;
         expected.asset_contract =
             ScAddress::Contract(stellar_xdr::ContractId(stellar_xdr::Hash([0x99; 32])));
@@ -532,7 +608,7 @@ mod tests {
 
     #[test]
     fn rejects_wrong_payer() {
-        let f = load();
+        let f = load("legacy_transfer_signed");
         let mut expected = f.expected;
         expected.payer = "GCQJVJPUPJTVTABP7FK7RXBNFIKKLSM5EO7JP6DECJ77SOBUKWSPB64N"
             .parse()
@@ -548,7 +624,7 @@ mod tests {
 
     #[test]
     fn rejects_wrong_amount() {
-        let f = load();
+        let f = load("legacy_transfer_signed");
         let mut expected = f.expected;
         expected.amount += 1;
         let result = verify_entry(
@@ -562,7 +638,7 @@ mod tests {
 
     #[test]
     fn rejects_non_positive_amount() {
-        let f = load();
+        let f = load("legacy_transfer_signed");
         // Test with amount = 0
         let mut expected_zero = f.expected.clone();
         expected_zero.amount = 0;
@@ -595,7 +671,7 @@ mod tests {
 
     #[test]
     fn rejects_wrong_recipient() {
-        let f = load();
+        let f = load("legacy_transfer_signed");
         let mut expected = f.expected;
         expected.recipient = ScAddress::Account(stellar_xdr::AccountId(
             stellar_xdr::PublicKey::PublicKeyTypeEd25519(stellar_xdr::Uint256([0x77; 32])),
@@ -609,9 +685,89 @@ mod tests {
         assert_eq!(result, Err(SorochargeError::RecipientMismatch));
     }
 
+    /// Locks the documented check order: expiry is checked before the
+    /// asset, amount, recipient, and signature, so an entry that is both
+    /// expired *and* wrong on any of those must report `ExpiredEntry`. A
+    /// refactor that moved the expiry check below the amount comparison
+    /// would start returning `AmountMismatch` here and fail this test.
+    #[test]
+    fn reports_expiry_before_a_wrong_amount() {
+        let f = load("legacy_transfer_signed");
+        let mut expected = f.expected.clone();
+        expected.amount += 1;
+        let result = verify_entry(
+            &f.signed,
+            &expected,
+            f.valid_until_ledger,
+            &f.network_passphrase,
+        );
+        assert_eq!(
+            result,
+            Err(SorochargeError::ExpiredEntry {
+                valid_until_ledger: f.valid_until_ledger,
+                current_ledger: f.valid_until_ledger,
+            }),
+            "expiry must be reported before the amount mismatch"
+        );
+    }
+
+    /// Locks the asset check ahead of the payer, amount, and recipient
+    /// checks: an entry whose asset, payer, amount, and recipient are all
+    /// wrong must report `AssetMismatch` first. Reordering asset after any
+    /// of those would fail this test.
+    #[test]
+    fn reports_asset_before_payer_amount_and_recipient() {
+        let f = load("legacy_transfer_signed");
+        let mut expected = f.expected.clone();
+        expected.asset_contract =
+            ScAddress::Contract(stellar_xdr::ContractId(stellar_xdr::Hash([0x99; 32])));
+        expected.payer = ScAddress::Account(AccountId(PublicKey::PublicKeyTypeEd25519(Uint256(
+            [0x11; 32],
+        ))));
+        expected.amount += 1;
+        expected.recipient = ScAddress::Account(AccountId(PublicKey::PublicKeyTypeEd25519(
+            Uint256([0x77; 32]),
+        )));
+        let result = verify_entry(
+            &f.signed,
+            &expected,
+            f.valid_until_ledger - 1,
+            &f.network_passphrase,
+        );
+        assert_eq!(
+            result,
+            Err(SorochargeError::AssetMismatch),
+            "the asset check must run before payer, amount, and recipient"
+        );
+    }
+
+    /// Locks the amount check ahead of the recipient and signature checks:
+    /// an entry with a wrong amount *and* a wrong recipient must report
+    /// `AmountMismatch`, not `RecipientMismatch`.
+    #[test]
+    fn reports_amount_before_recipient() {
+        let f = load("legacy_transfer_signed");
+        let mut expected = f.expected.clone();
+        expected.amount += 1;
+        expected.recipient = ScAddress::Account(AccountId(PublicKey::PublicKeyTypeEd25519(
+            Uint256([0x77; 32]),
+        )));
+        let result = verify_entry(
+            &f.signed,
+            &expected,
+            f.valid_until_ledger - 1,
+            &f.network_passphrase,
+        );
+        assert_eq!(
+            result,
+            Err(SorochargeError::AmountMismatch),
+            "the amount check must run before the recipient check"
+        );
+    }
+
     #[test]
     fn rejects_a_tampered_signature() {
-        let f = load();
+        let f = load("legacy_transfer_signed");
         let xdr_entry = f.signed.as_xdr().clone();
         let SorobanCredentials::Address(mut creds) = xdr_entry.credentials.clone() else {
             panic!("expected legacy Address credentials in this fixture");
@@ -638,7 +794,7 @@ mod tests {
     fn rejects_a_genuine_signature_from_a_key_other_than_the_claimed_account() {
         use ed25519_dalek::{Signer as DalekSigner, SigningKey};
 
-        let f = load();
+        let f = load("legacy_transfer_signed");
         let xdr_entry = f.signed.as_xdr().clone();
         let SorobanCredentials::Address(mut creds) = xdr_entry.credentials.clone() else {
             panic!("expected legacy Address credentials in this fixture");
@@ -678,7 +834,7 @@ mod tests {
 
     #[test]
     fn rejects_an_invocation_that_is_not_a_bare_transfer() {
-        let f = load();
+        let f = load("legacy_transfer_signed");
         let xdr_entry = f.signed.as_xdr().clone();
         let mut root_invocation = xdr_entry.root_invocation.clone();
         // Smuggle in a sub-invocation alongside the transfer.
@@ -801,6 +957,26 @@ mod tests {
             let (signed, params) = build_signed_delegated(&delegates, &[0], 1_000, 1_000, NETWORK);
             let weights: Vec<(Address, u32)> =
                 delegates.iter().map(|(_, a)| (a.clone(), 1)).collect();
+
+            let result = verify_delegated_threshold(&signed, &params, 500, NETWORK, &weights, 2);
+            assert_eq!(result, Err(SorochargeError::InvalidSignature));
+        }
+
+        /// Pins the documented fold-in on `InvalidSignature`: every attached
+        /// signature here is genuine, but one signer is absent from the
+        /// weight list, so the weight that counts falls short of the
+        /// threshold — reported as `InvalidSignature`, not a distinct variant.
+        #[test]
+        fn rejects_genuine_signatures_whose_counted_weight_is_below_the_threshold() {
+            let delegates = [delegate(0x01), delegate(0x02)];
+            let (signed, params) =
+                build_signed_delegated(&delegates, &[0, 1], 1_000, 1_000, NETWORK);
+            assert_eq!(
+                verify_entry(&signed, &params, 500, NETWORK),
+                Ok(()),
+                "both signatures are genuine on their own"
+            );
+            let weights: Vec<(Address, u32)> = vec![(delegates[0].1.clone(), 1)];
 
             let result = verify_delegated_threshold(&signed, &params, 500, NETWORK, &weights, 2);
             assert_eq!(result, Err(SorochargeError::InvalidSignature));

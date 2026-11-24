@@ -178,6 +178,22 @@ impl UnsignedEntry {
     pub fn as_xdr(&self) -> &SorobanAuthorizationEntry {
         &self.0
     }
+
+    /// The ledger number this entry expires at, read back off the entry —
+    /// exactly the `valid_until_ledger` it was built with.
+    ///
+    /// Exposed so a payer can tell a user when the authorization it just built
+    /// stops being accepted, without re-deriving that from the inputs it passed
+    /// in and without reaching into raw XDR.
+    ///
+    /// # Errors
+    ///
+    /// [`SorochargeError::UnsupportedCredentialType`] if the entry carries
+    /// `SourceAccount` credentials, which have no expiration ledger;
+    /// [`build_charge_entry`] never produces those.
+    pub fn signature_expiration_ledger(&self) -> Result<u32, SorochargeError> {
+        crate::sign::entry_expiration_ledger(&self.0)
+    }
 }
 
 /// The empty-vector signature placeholder used before an entry is signed,
@@ -308,8 +324,8 @@ fn build_transfer_invocation(
 /// cryptographic weight of its own — the entry's signature is what the
 /// network actually verifies.
 fn random_nonce() -> Result<i64, SorochargeError> {
-    let bits = getrandom::u64().map_err(|e| SorochargeError::XdrEncodingFailed {
-        reason: format!("failed to generate nonce: {e}"),
+    let bits = getrandom::u64().map_err(|e| SorochargeError::NonceGenerationFailed {
+        reason: e.to_string(),
     })?;
     Ok(bits as i64)
 }
@@ -326,8 +342,10 @@ fn random_nonce() -> Result<i64, SorochargeError> {
 ///
 /// Returns [`SorochargeError::UnsupportedCredentialType`] for a
 /// `credential` this build of the library does not yet construct XDR for,
-/// and [`SorochargeError::XdrEncodingFailed`] if a value can't be encoded
-/// into its XDR-constrained shape (e.g. a `VecM` length limit).
+/// [`SorochargeError::XdrEncodingFailed`] if a value can't be encoded
+/// into its XDR-constrained shape (e.g. a `VecM` length limit), and
+/// [`SorochargeError::NonceGenerationFailed`] if the OS random-number source
+/// fails while drawing the nonce.
 ///
 /// # Example
 ///
@@ -440,6 +458,46 @@ mod golden_vector_tests {
                     .expect("an ScAddress always encodes to XDR")
             })
             .collect()
+    }
+
+    /// A nonce's entire purpose is uniqueness (replay prevention), but no
+    /// existing test checked that repeated builds with identical inputs
+    /// actually produce distinct nonces — only that `random_nonce` doesn't
+    /// error. Sample 1,000 builds: a collision in an i64 nonce space is
+    /// astronomically unlikely in 1,000 draws (~2.7e-14), so any repeat here
+    /// means the nonce source is frozen or reused, not bad luck.
+    #[test]
+    fn random_nonce_produces_distinct_values_across_repeated_builds() {
+        use std::collections::HashSet;
+
+        let params = ChargeParams {
+            asset_contract: "CAZTGMZTGMZTGMZTGMZTGMZTGMZTGMZTGMZTGMZTGMZTGMZTGMZTGGJH"
+                .parse()
+                .unwrap(),
+            amount: 1_000_000_000,
+            payer: "GDIEVMRSOQV3JKZ2CNUL2RQV4TTNAISKW4NAC25PQUQKGMWJO6DTOAE7"
+                .parse()
+                .unwrap(),
+            recipient: "GCQJVJPUPJTVTABP7FK7RXBNFIKKLSM5EO7JP6DECJ77SOBUKWSPB64N"
+                .parse()
+                .unwrap(),
+            valid_until_ledger: 123_456,
+        };
+
+        let mut seen = HashSet::new();
+        for _ in 0..1_000 {
+            let entry = build_charge_entry(&params, CredentialKind::Legacy)
+                .expect("build_charge_entry should succeed with identical valid params");
+            let SorobanCredentials::Address(credentials) = &entry.as_xdr().credentials else {
+                panic!("legacy credential kind should produce Address credentials");
+            };
+            assert!(
+                seen.insert(credentials.nonce),
+                "nonce {} was produced more than once across identical builds",
+                credentials.nonce
+            );
+        }
+        assert_eq!(seen.len(), 1_000);
     }
 
     #[test]
@@ -932,6 +990,62 @@ mod golden_vector_tests {
     #[test]
     fn amount_i128_max_round_trips_unchanged_through_build_sign_and_verify() {
         assert_amount_round_trips_unchanged(i128::MAX);
+    }
+
+    /// The expiry a caller asked for must be readable back off both the
+    /// unsigned and the signed entry, for every credential kind — the payer's
+    /// "expires around ledger N" display reads it from the entry it holds, not
+    /// from the parameters it passed in.
+    fn assert_expiration_ledger_is_reported(credential: CredentialKind) {
+        let fixture = load_fixture("legacy_transfer");
+        let valid_until_ledger = 4_242_424;
+        let params = ChargeParams {
+            asset_contract: fixture.asset_contract.parse::<ScAddress>().unwrap(),
+            amount: fixture.amount.parse().unwrap(),
+            payer: fixture.payer.parse::<ScAddress>().unwrap(),
+            recipient: fixture.recipient.parse::<ScAddress>().unwrap(),
+            valid_until_ledger,
+        };
+        let nonce: i64 = fixture.nonce.parse().unwrap();
+
+        let unsigned = build_charge_entry_with_nonce(&params, credential, nonce)
+            .expect("build_charge_entry_with_nonce should succeed for every credential kind");
+        assert_eq!(
+            unsigned.signature_expiration_ledger(),
+            Ok(valid_until_ledger),
+            "an unsigned entry must report the valid_until_ledger it was built with"
+        );
+
+        let signer = FixedSeedPayerSigner {
+            signing_key: SigningKey::from_bytes(&[0x11u8; 32]),
+            address: params.payer.clone(),
+        };
+        let signed = sign_entry(unsigned, &signer, "Test SDF Network ; September 2015")
+            .expect("sign_entry should succeed for a signer that matches the payer node");
+        assert_eq!(
+            signed.signature_expiration_ledger(),
+            Ok(valid_until_ledger),
+            "signing must not change the expiry the entry reports"
+        );
+    }
+
+    #[test]
+    fn expiration_ledger_is_reported_for_legacy_credentials() {
+        assert_expiration_ledger_is_reported(CredentialKind::Legacy);
+    }
+
+    #[test]
+    fn expiration_ledger_is_reported_for_address_v2_credentials() {
+        assert_expiration_ledger_is_reported(CredentialKind::AddressV2);
+    }
+
+    #[test]
+    fn expiration_ledger_is_reported_for_delegated_credentials() {
+        let fixture = load_fixture("legacy_transfer");
+        let payer = fixture.payer.parse::<ScAddress>().unwrap();
+        assert_expiration_ledger_is_reported(CredentialKind::Delegated {
+            signers: vec![payer],
+        });
     }
 }
 

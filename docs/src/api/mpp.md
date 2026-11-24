@@ -124,6 +124,9 @@ pub struct Receipt {
 
 ## `MppError`
 
+For what each variant usually means in practice and what to check first, see
+[Troubleshooting errors](../guides/troubleshooting.md).
+
 | Variant | Meaning |
 |---|---|
 | `HttpRequestFailed { reason }` | The HTTP request itself failed. |
@@ -140,7 +143,7 @@ pub struct Receipt {
 | `UnexpectedTransactionShape { reason }` | Not a bare SEP-41 transfer. |
 | `ForbiddenCredentialType` | Anything other than legacy `sorobanCredentialsAddress` in pull mode. |
 | `PushModeForbidsFeePayer` | A `type="hash"` credential against a `feePayer: true` challenge. |
-| `ServerAddressConflict` | The server's own address appeared where the safety checks forbid it. |
+| `ServerAddressConflict` | In sponsored pull mode, the server's own address is the transfer's `from` or the auth entry's credential address. |
 | `RpcFailed { reason }` | A Stellar RPC call failed. |
 | `HashAlreadyConsumed` | A push-mode hash was already settled once. |
 | `VerificationFailed { reason }` | The credential failed a verification check. |

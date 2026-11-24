@@ -81,9 +81,19 @@ struct AppState {
     charge: ChargeRequest,
     /// Challenge id -> the request it was issued for. Entries are removed
     /// on first use, so a credential can only ever settle once.
+    ///
+    /// DEMO ONLY: this in-memory map is lost on every restart. A production
+    /// store must be durable and shared across all server instances.
     issued: Mutex<HashMap<String, (ChargeRequest, DateTime<Utc>)>>,
     /// Push-mode transaction hashes already settled. The spec requires a
     /// server to reject a hash it has consumed, even on a fresh challenge.
+    ///
+    /// DEMO ONLY: an in-memory `HashSet` loses all replay-protection state on
+    /// restart and is not shared between instances, so a hash settled before
+    /// a restart (or on another instance) would be accepted again. A
+    /// production store needs durability plus an atomic check-and-mark
+    /// operation (e.g. an insert-if-absent on a unique key), so two concurrent
+    /// requests for the same hash cannot both observe it as unconsumed.
     consumed_hashes: Mutex<HashSet<String>>,
     counter: AtomicU64,
 }

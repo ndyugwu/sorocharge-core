@@ -21,3 +21,39 @@ pub fn caip2_for_passphrase(network_passphrase: &str) -> Result<&'static str, So
         }),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn maps_known_passphrases_to_caip2() {
+        assert_eq!(
+            caip2_for_passphrase(PUBNET_PASSPHRASE),
+            Ok("stellar:pubnet")
+        );
+        assert_eq!(
+            caip2_for_passphrase(TESTNET_PASSPHRASE),
+            Ok("stellar:testnet")
+        );
+    }
+
+    /// `UnsupportedNetwork` is the only failure here, and it carries the
+    /// rejected passphrase verbatim — including a CAIP-2 id mistakenly
+    /// passed where a passphrase was expected.
+    #[test]
+    fn unknown_passphrase_is_unsupported_network_carrying_it_verbatim() {
+        for bad in [
+            "stellar:testnet",
+            "",
+            "Test SDF Future Network ; October 2022",
+        ] {
+            assert_eq!(
+                caip2_for_passphrase(bad),
+                Err(SorochargeError::UnsupportedNetwork {
+                    network: bad.to_string(),
+                })
+            );
+        }
+    }
+}

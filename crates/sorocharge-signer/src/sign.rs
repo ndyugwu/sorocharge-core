@@ -129,6 +129,36 @@ impl SignedEntry {
     pub fn from_xdr(entry: SorobanAuthorizationEntry) -> Self {
         Self(entry)
     }
+
+    /// The ledger number this entry's signature expires at, read back off the
+    /// entry itself.
+    ///
+    /// The expiry is what the network checks when it consumes the entry, so a
+    /// payer-side caller — showing "this authorization expires around ledger
+    /// N", or deciding whether an entry is still worth sending — needs to read
+    /// it from the signed entry rather than remember the parameters it was
+    /// built from. Same value as [`crate::UnsignedEntry::signature_expiration_ledger`]
+    /// on the entry that was signed.
+    ///
+    /// # Errors
+    ///
+    /// [`SorochargeError::UnsupportedCredentialType`] if the entry carries
+    /// `SourceAccount` credentials, which authenticate by transaction signature
+    /// and so have no expiration ledger to report. Entries built and signed by
+    /// this crate never do.
+    pub fn signature_expiration_ledger(&self) -> Result<u32, SorochargeError> {
+        entry_expiration_ledger(&self.0)
+    }
+}
+
+/// The expiry ledger of whichever credential variant `entry` carries — one
+/// implementation shared by [`UnsignedEntry`](crate::UnsignedEntry) and
+/// [`SignedEntry`], so the two can never disagree about what an entry's expiry
+/// is.
+pub(crate) fn entry_expiration_ledger(
+    entry: &SorobanAuthorizationEntry,
+) -> Result<u32, SorochargeError> {
+    credential_preimage_fields(&entry.credentials).map(|(_, ledger, _)| ledger)
 }
 
 /// The 32-byte SHA-256 of a network passphrase — Stellar's `network_id`,
@@ -290,9 +320,12 @@ fn sign_matching_node(
             sign_with_delegates(c, target, signature_scval)
                 .map(SorobanCredentials::AddressWithDelegates)
         }
-        SorobanCredentials::Address(_)
-        | SorobanCredentials::AddressV2(_)
-        | SorobanCredentials::SourceAccount => Err(SorochargeError::NoMatchingCredentialNode),
+        SorobanCredentials::Address(_) | SorobanCredentials::AddressV2(_) => {
+            Err(SorochargeError::NoMatchingCredentialNode)
+        }
+        // A source-account credential has no address node to match, so this
+        // is an unsupported shape, not a signer/node mismatch.
+        SorobanCredentials::SourceAccount => Err(SorochargeError::UnsupportedCredentialType),
     }
 }
 
@@ -351,10 +384,13 @@ fn sign_with_delegates(
 ///
 /// # Errors
 ///
-/// Returns [`SorochargeError::NoMatchingCredentialNode`] if `signer`'s
-/// address matches no signable node in `entry`, and
-/// [`SorochargeError::SigningFailed`] if `signer` itself fails, or is not
-/// an Ed25519 account address.
+/// Returns [`SorochargeError::UnsupportedSignerAddress`] if `signer`'s
+/// address is not an Ed25519 account, [`SorochargeError::UnsupportedCredentialType`]
+/// if `entry` carries `SourceAccount` credentials,
+/// [`SorochargeError::NoMatchingCredentialNode`] if `signer`'s address
+/// matches no signable node in `entry`, and whatever error `signer` itself
+/// returns from [`Signer::sign_preimage`] (conventionally
+/// [`SorochargeError::SigningFailed`]), unchanged.
 ///
 /// # Examples
 ///
@@ -413,8 +449,8 @@ pub fn sign_entry(
     let ScAddress::Account(AccountId(PublicKey::PublicKeyTypeEd25519(Uint256(public_key)))) =
         target.clone()
     else {
-        return Err(SorochargeError::SigningFailed {
-            reason: "signer address must be an Ed25519 account (G...), not a contract".to_string(),
+        return Err(SorochargeError::UnsupportedSignerAddress {
+            address: target.to_string(),
         });
     };
 
@@ -561,6 +597,130 @@ mod golden_vector_tests {
         assert_eq!(
             result.unwrap_err(),
             SorochargeError::NoMatchingCredentialNode
+        );
+    }
+
+    fn audit_params() -> ChargeParams {
+        ChargeParams {
+            asset_contract: "CAZTGMZTGMZTGMZTGMZTGMZTGMZTGMZTGMZTGMZTGMZTGMZTGMZTGGJH"
+                .parse()
+                .unwrap(),
+            amount: 1,
+            payer: "GDIEVMRSOQV3JKZ2CNUL2RQV4TTNAISKW4NAC25PQUQKGMWJO6DTOAE7"
+                .parse()
+                .unwrap(),
+            recipient: "GCQJVJPUPJTVTABP7FK7RXBNFIKKLSM5EO7JP6DECJ77SOBUKWSPB64N"
+                .parse()
+                .unwrap(),
+            valid_until_ledger: 1,
+        }
+    }
+
+    /// A signer whose `address()` is a contract has no Ed25519 key to attach,
+    /// which is a distinct failure from the `Signer` itself erroring — it must
+    /// not be folded into `SigningFailed`.
+    #[test]
+    fn sign_entry_rejects_contract_signer_address_as_unsupported_signer_address() {
+        let params = audit_params();
+        let unsigned =
+            build_charge_entry_with_nonce(&params, CredentialKind::AddressV2, 1).unwrap();
+        let contract = "CAZTGMZTGMZTGMZTGMZTGMZTGMZTGMZTGMZTGMZTGMZTGMZTGMZTGGJH";
+        let signer = FixedSeedSigner {
+            signing_key: SigningKey::from_bytes(&[0x11u8; 32]),
+            address: contract.parse().unwrap(),
+        };
+
+        let result = sign_entry(unsigned, &signer, "Test SDF Network ; September 2015");
+
+        assert_eq!(
+            result.unwrap_err(),
+            SorochargeError::UnsupportedSignerAddress {
+                address: contract.to_string(),
+            }
+        );
+    }
+
+    /// `SigningFailed` is the `Signer`'s own error; `sign_entry` must
+    /// propagate it unchanged rather than rewrap or replace it.
+    #[test]
+    fn sign_entry_propagates_signer_failure_unchanged() {
+        struct FailingSigner(Address);
+        impl Signer for FailingSigner {
+            fn sign_preimage(&self, _: &[u8]) -> Result<[u8; 64], SorochargeError> {
+                Err(SorochargeError::SigningFailed {
+                    reason: "hsm offline".to_string(),
+                })
+            }
+            fn address(&self) -> Address {
+                self.0.clone()
+            }
+        }
+
+        let params = audit_params();
+        let unsigned = build_charge_entry_with_nonce(&params, CredentialKind::Legacy, 1).unwrap();
+        let result = sign_entry(
+            unsigned,
+            &FailingSigner(params.payer.clone()),
+            "Test SDF Network ; September 2015",
+        );
+
+        assert_eq!(
+            result.unwrap_err(),
+            SorochargeError::SigningFailed {
+                reason: "hsm offline".to_string(),
+            }
+        );
+    }
+
+    /// A delegated entry signed by an address that is neither the top-level
+    /// address nor any delegate is a genuine node mismatch.
+    #[test]
+    fn sign_entry_rejects_non_delegate_signer_on_delegated_entry() {
+        let params = audit_params();
+        let delegate: Address = "GCQJVJPUPJTVTABP7FK7RXBNFIKKLSM5EO7JP6DECJ77SOBUKWSPB64N"
+            .parse()
+            .unwrap();
+        let unsigned = build_charge_entry_with_nonce(
+            &params,
+            CredentialKind::Delegated {
+                signers: vec![delegate],
+            },
+            1,
+        )
+        .unwrap();
+        let signing_key = SigningKey::from_bytes(&[0x77u8; 32]);
+        let address = ScAddress::Account(stellar_xdr::AccountId(
+            stellar_xdr::PublicKey::PublicKeyTypeEd25519(stellar_xdr::Uint256(
+                signing_key.verifying_key().to_bytes(),
+            )),
+        ));
+        let signer = FixedSeedSigner {
+            signing_key,
+            address,
+        };
+
+        let result = sign_entry(unsigned, &signer, "Test SDF Network ; September 2015");
+
+        assert_eq!(
+            result.unwrap_err(),
+            SorochargeError::NoMatchingCredentialNode
+        );
+    }
+
+    /// `SourceAccount` credentials have no address node at all, so
+    /// `sign_matching_node` must report them as an unsupported credential
+    /// shape, not as `NoMatchingCredentialNode`.
+    #[test]
+    fn sign_matching_node_reports_source_account_as_unsupported_credential_type() {
+        let target: Address = "GDIEVMRSOQV3JKZ2CNUL2RQV4TTNAISKW4NAC25PQUQKGMWJO6DTOAE7"
+            .parse()
+            .unwrap();
+
+        let result = sign_matching_node(SorobanCredentials::SourceAccount, &target, ScVal::Void);
+
+        assert_eq!(
+            result.unwrap_err(),
+            SorochargeError::UnsupportedCredentialType
         );
     }
 }
