@@ -25,10 +25,14 @@ pub enum MppError {
         reason: String,
     },
     /// The challenge named a payment method other than `"stellar"`.
-    /// The client-side challenge parser returns this variant when the parsed
-    /// method is not `"stellar"`, passing that method as the error value. This
-    /// is the only return site in the crate; no other condition returns it.
-    /// That condition matches the documented meaning; no mismatch was found.
+    ///
+    /// Audited return sites, carrying the offending method as `method`:
+    /// - `get_with_payment` in `client.rs`, when the `402` challenge's
+    ///   `method` auth-param is not `"stellar"`.
+    /// - `settle_credential` in `server.rs`, when the credential's echoed
+    ///   `challenge.method` is not `"stellar"`.
+    ///
+    /// Both match the documented meaning; no mismatch found.
     UnsupportedMethod {
         method: String,
     },
