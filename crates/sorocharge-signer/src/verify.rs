@@ -172,19 +172,20 @@ fn is_valid_ed25519_signature(address: &Address, payload: &[u8; 32], scval: &ScV
 ///    asset/amount/recipient, regardless of whose key actually signed it —
 ///    added per this project's brief to resolve spec ambiguity toward the
 ///    more conservative reading.
-/// 6. [`SorochargeError::AmountNonPositive`] — the caller's
-///    `expected.amount` is zero or negative, so no signed entry could ever
-///    legitimately match it; this precondition is checked before the amount
-///    diff so the caller's own invalid expectation is reported as such
-///    rather than surfacing as [`SorochargeError::AmountMismatch`].
-/// 7. [`SorochargeError::AmountMismatch`] — the amount differs.
-/// 8. [`SorochargeError::RecipientMismatch`] — the recipient differs.
-/// 9. [`SorochargeError::InvalidSignature`] — no signable node (the
-///    top-level address, or, for `Delegated`, any delegate) carries a valid
-///    ed25519 signature over the reconstructed `HashIdPreimage`. A
-///    `Delegated` entry's account-contract-specific signing *policy*
-///    (how many delegates must sign, or which) is unknowable here — this
-///    only proves at least one attached signature is genuine.
+/// 7. [`SorochargeError::AmountNonPositive`] — the entry's own transfer
+///    amount is zero or negative (the `i128` value embedded in the signed
+///    invocation). `expected.amount` has already been proved positive by
+///    step 1; this step catches a non-positive amount on the entry side,
+///    reported distinctly so it doesn't surface as
+///    [`SorochargeError::AmountMismatch`].
+/// 8. [`SorochargeError::AmountMismatch`] — the amount differs.
+/// 9. [`SorochargeError::RecipientMismatch`] — the recipient differs.
+/// 10. [`SorochargeError::InvalidSignature`] — no signable node (the
+///     top-level address, or, for `Delegated`, any delegate) carries a valid
+///     ed25519 signature over the reconstructed `HashIdPreimage`. A
+///     `Delegated` entry's account-contract-specific signing *policy*
+///     (how many delegates must sign, or which) is unknowable here — this
+///     only proves at least one attached signature is genuine.
 ///
 /// # Errors
 ///

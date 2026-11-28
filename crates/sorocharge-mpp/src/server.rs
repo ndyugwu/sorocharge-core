@@ -747,6 +747,19 @@ mod tests {
     const RECIPIENT: &str = "GCQJVJPUPJTVTABP7FK7RXBNFIKKLSM5EO7JP6DECJ77SOBUKWSPB64N";
     const AMOUNT: i128 = 42_000_000;
 
+    /// Pins [`MppServerConfig::default`] to the exact values its doc comment
+    /// describes as this crate's conservative choice. The MPP spec mandates
+    /// no fee ceiling of its own, so the defaults are the crate's statement
+    /// about its fee-exhaustion posture; without this test an edit to either
+    /// field would silently change that posture without contradicting any
+    /// documented value.
+    #[test]
+    fn server_config_default_matches_documented_conservative_values() {
+        let config = MppServerConfig::default();
+        assert_eq!(config.max_transaction_fee_stroops, 50_000);
+        assert_eq!(config.inclusion_buffer_stroops, 100);
+    }
+
     fn charge_request(fee_payer: bool) -> ChargeRequest {
         ChargeRequest {
             amount: AMOUNT.to_string(),
@@ -868,9 +881,10 @@ mod tests {
             .settle_credential(&credential, &expected, Utc::now(), false)
             .await;
 
-        assert!(
-            matches!(result, Err(MppError::PushModeForbidsFeePayer)),
-            "expected PushModeForbidsFeePayer, got {result:?}"
+        assert_eq!(
+            result,
+            Err(MppError::PushModeForbidsFeePayer),
+            "a hash-type credential against a feePayer:true challenge must be rejected"
         );
     }
 

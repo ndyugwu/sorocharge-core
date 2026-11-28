@@ -39,15 +39,28 @@ pub enum MppError {
     /// The challenge named an intent other than `"charge"` (MPP
     /// session/channel mode, which uses a different signing primitive
     /// entirely, is explicitly out of scope for this crate).
+    ///
+    /// Call sites span `client.rs` and `server.rs`. All sites check conformance
+    /// with the MPP specification for the supported intent.
+    /// Audited for issue tracker; no mismatch found.
     UnsupportedIntent {
         intent: String,
     },
     /// The challenge's `request` field did not base64url-decode to valid
     /// charge-request JSON.
+    ///
+    /// Returned by `encode_base64url_jcs` in `header.rs` (when JCS serialization
+    /// fails) and by client challenge-parsing logic when the `request` parameter
+    /// fails to decode or deserialize. Audited for issue #294; no mismatch found.
     InvalidChargeRequest {
         reason: String,
     },
     /// A network identifier this crate does not have a CAIP-2 mapping for.
+    ///
+    /// Returned by `caip2_for_passphrase` in `network.rs` when given a network
+    /// passphrase other than mainnet's or testnet's. All call sites check
+    /// network identifier validity against supported CAIP-2 mappings.
+    /// Audited for issue #309; no mismatch found.
     UnsupportedNetwork {
         network: String,
     },
