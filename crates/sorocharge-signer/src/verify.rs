@@ -181,11 +181,11 @@ fn is_valid_ed25519_signature(address: &Address, payload: &[u8; 32], scval: &ScV
 /// 8. [`SorochargeError::AmountMismatch`] — the amount differs.
 /// 9. [`SorochargeError::RecipientMismatch`] — the recipient differs.
 /// 10. [`SorochargeError::InvalidSignature`] — no signable node (the
-///    top-level address, or, for `Delegated`, any delegate) carries a valid
-///    ed25519 signature over the reconstructed `HashIdPreimage`. A
-///    `Delegated` entry's account-contract-specific signing *policy*
-///    (how many delegates must sign, or which) is unknowable here — this
-///    only proves at least one attached signature is genuine.
+///     top-level address, or, for `Delegated`, any delegate) carries a valid
+///     ed25519 signature over the reconstructed `HashIdPreimage`. A
+///     `Delegated` entry's account-contract-specific signing *policy*
+///     (how many delegates must sign, or which) is unknowable here — this
+///     only proves at least one attached signature is genuine.
 ///
 /// # Errors
 ///
