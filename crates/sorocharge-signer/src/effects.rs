@@ -96,7 +96,9 @@ fn i128_from_scval(value: &ScVal) -> Option<i128> {
 /// - [`SorochargeError::SimulationEventsMalformed`] if an event does not
 ///   decode, or a balance event lacks the expected topics or data.
 /// - [`SorochargeError::UnexpectedBalanceChange`] for any extra or
-///   out-of-place balance movement.
+///   out-of-place balance movement, **or** if `asset_contract` is not a
+///   `ScAddress::Contract` — only contract addresses can emit asset events;
+///   an account address (`G...`) is rejected immediately with this error.
 /// - [`SorochargeError::ExpectedTransferMissing`] if the expected transfer
 ///   does not appear.
 pub fn verify_transfer_effects(
@@ -395,6 +397,29 @@ mod tests {
         assert_eq!(result, Err(SorochargeError::ExpectedTransferMissing));
     }
 
+    /// Pins the documented fold-in on `UnexpectedBalanceChange`: an
+    /// `asset_contract` that is an account (`G...`), not a contract, can
+    /// never emit the expected payment, so the check fails closed before
+    /// reading any event — even on an otherwise valid simulation.
+    #[test]
+    fn rejects_an_asset_address_that_is_not_a_contract() {
+        let f = load();
+        let (_asset, payer, recipient, amount) = expected(&f);
+        let result = verify_transfer_effects(
+            &f.diagnostic_events_xdr_base64,
+            &someone_else(),
+            &payer,
+            &recipient,
+            amount,
+        );
+        assert_eq!(
+            result,
+            Err(SorochargeError::UnexpectedBalanceChange {
+                reason: "asset address is not a contract".to_string(),
+            })
+        );
+    }
+
     #[test]
     fn rejects_a_second_transfer_event() {
         let f = load();
@@ -485,6 +510,31 @@ mod tests {
             Err(SorochargeError::SimulationEventsMalformed {
                 reason: "transfer event lacks from/to address topics".to_string(),
             })
+        );
+    }
+
+    /// Passes an account address (`G...`) as `asset_contract`. The function
+    /// immediately returns `UnexpectedBalanceChange` before inspecting any
+    /// events — a path not covered by the fixture-based tests above, and not
+    /// previously documented in `# Errors`.
+    #[test]
+    fn rejects_a_non_contract_asset_address() {
+        let f = load();
+        let (_, payer, recipient, amount) = expected(&f);
+        // Use an account (G...) address in place of the asset contract.
+        let account_asset: Address = "GDIEVMRSOQV3JKZ2CNUL2RQV4TTNAISKW4NAC25PQUQKGMWJO6DTOAE7"
+            .parse()
+            .unwrap();
+        let result = verify_transfer_effects(
+            &f.diagnostic_events_xdr_base64,
+            &account_asset,
+            &payer,
+            &recipient,
+            amount,
+        );
+        assert!(
+            matches!(result, Err(SorochargeError::UnexpectedBalanceChange { .. })),
+            "a non-contract asset address should return UnexpectedBalanceChange"
         );
     }
 
